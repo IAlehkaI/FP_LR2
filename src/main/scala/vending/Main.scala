@@ -8,33 +8,6 @@ import vending.interpreters.{LiveConsole, LiveVendingMachine}
 import vending.monads.VendingEff
 import scala.util.Try
 
-sealed trait MenuCommand
-object MenuCommand {
-  case object InsertCoin extends MenuCommand
-  case object BuyProduct extends MenuCommand
-  case object Refund extends MenuCommand
-  case object RefillProduct extends MenuCommand
-  case object NextDay extends MenuCommand
-  case object ShowState extends MenuCommand
-  case object ShowLog extends MenuCommand
-  case object Exit extends MenuCommand
-  case object Empty extends MenuCommand
-  case class Unknown(raw: String) extends MenuCommand
-
-  def parse(input: String): MenuCommand = input.trim match {
-    case "1" => InsertCoin
-    case "2" => BuyProduct
-    case "3" => Refund
-    case "4" => RefillProduct
-    case "5" => NextDay
-    case "6" => ShowState
-    case "7" => ShowLog
-    case "0" => Exit
-    case ""  => Empty
-    case other => Unknown(other)
-  }
-}
-
 object Main {
 
   val config = Config(
@@ -113,10 +86,10 @@ object Main {
 
   def parseProductSelection(input: String): Option[String] = {
     val trimmed = input.trim
-    Try(trimmed.toInt).toOption match {
-      case Some(num) if num >= 1 && num <= productList.length => Some(productList(num - 1))
-      case _ => productList.find(_.equalsIgnoreCase(trimmed))
-    }
+    Try(trimmed.toInt).toOption
+      .filter(num => num >= 1 && num <= productList.length)
+      .map(num => productList(num - 1))
+      .orElse(productList.find(_.equalsIgnoreCase(trimmed)))
   }
 
   def programLoop[F[_]: Monad](implicit C: Console[F], VM: VendingMachine[F]): F[Unit] = {
@@ -125,117 +98,119 @@ object Main {
       state <- VM.getRawState()
       _ <- renderMenu[F](state)
       actionStr <- C.readLn()
-      cmd = MenuCommand.parse(actionStr)
-      _ <- handleCommand[F](cmd)
+      _ <- handleInput[F](actionStr)
     } yield ()
   }
 
-  def handleCommand[F[_]: Monad](cmd: MenuCommand)(implicit C: Console[F], VM: VendingMachine[F]): F[Unit] = {
-    cmd match {
-      case MenuCommand.InsertCoin =>
-        for {
-          _ <- C.putStrLn(s" Enter coin(s) separated by space (e.g. '10 50 10'): ")
-          inputStr <- C.readLn()
-          coins = inputStr.trim.split("\\s+").toList.flatMap(s => Try(s.toInt).toOption)
-          _ <- if (coins.isEmpty) C.putStrLn("\n[!] No valid coins entered.") else Monad[F].pure(())
-          _ <- insertAllCoins[F](coins)
-          _ <- programLoop[F]
-        } yield ()
+  def handleInput[F[_]: Monad](input: String)(implicit C: Console[F], VM: VendingMachine[F]): F[Unit] = {
+    val actions: Map[String, () => F[Unit]] = Map(
+      "1" -> (() => actionInsertCoin[F]),
+      "2" -> (() => actionBuyProduct[F]),
+      "3" -> (() => VM.cancelPurchase().flatMap(_ => programLoop[F])),
+      "4" -> (() => actionRefillProduct[F]),
+      "5" -> (() => VM.nextDay().flatMap(_ => programLoop[F])),
+      "6" -> (() => actionShowState[F]),
+      "7" -> (() => actionShowLog[F]),
+      "0" -> (() => actionExit[F]),
+      (""  , (() => programLoop[F]))
+    )
 
-      case MenuCommand.BuyProduct =>
-        for {
-          _ <- C.putStrLn("\n Select product by Number (1-4) or Name (e.g. Cola):")
-          _ <- C.putStrLn(" Selection: ")
-          productInput <- C.readLn()
-          state <- VM.getRawState()
-          _ <- parseProductSelection(productInput) match {
-            case Some(productName) =>
-              for {
-                studentIdOpt <- askForStudentId[F](state)
-                _ <- VM.selectProduct(productName, studentIdOpt)
-                _ <- programLoop[F]
-              } yield ()
-            case None =>
-              C.putStrLn("\n[!] Invalid product selection.")
-                .flatMap(_ => C.readLn())
-                .flatMap(_ => programLoop[F])
-          }
-        } yield ()
+    // Если ввод не найден в мапе, вызываем actionUnknown
+    actions.getOrElse(input.trim, () => actionUnknown[F](input.trim))()
+  }
 
-      case MenuCommand.Refund =>
-        VM.cancelPurchase().flatMap(_ => programLoop[F])
+  def actionInsertCoin[F[_]: Monad](implicit C: Console[F], VM: VendingMachine[F]): F[Unit] =
+    for {
+      _ <- C.putStrLn(s" Enter coin(s) separated by space (e.g. '10 50 10'): ")
+      inputStr <- C.readLn()
+      coins = inputStr.trim.split("\\s+").toList.flatMap(s => Try(s.toInt).toOption)
+      _ <- if (coins.isEmpty) C.putStrLn("\n[!] No valid coins entered.") else Monad[F].pure(())
+      _ <- insertAllCoins[F](coins)
+      _ <- programLoop[F]
+    } yield ()
 
-      case MenuCommand.RefillProduct =>
-        for {
-          _ <- C.putStrLn(" Enter product name to refill (e.g. Cola): ")
-          pInput <- C.readLn()
-          _ <- C.putStrLn(" Enter amount to add: ")
-          aInput <- C.readLn()
-          amount = Try(aInput.trim.toInt).getOrElse(0)
-          _ <- parseProductSelection(pInput) match {
-            case Some(productName) if amount > 0 =>
-              VM.refillProduct(productName, amount).flatMap(_ => programLoop[F])
-            case _ =>
-              C.putStrLn("\n[!] Invalid product or amount.")
-                .flatMap(_ => C.readLn())
-                .flatMap(_ => programLoop[F])
-          }
-        } yield ()
-
-      case MenuCommand.NextDay =>
-        VM.nextDay().flatMap(_ => programLoop[F])
-
-      case MenuCommand.ShowState =>
-        for {
-          state <- VM.getRawState()
-          _ <- C.putStrLn("\n" + "="*45)
-          _ <- C.putStrLn(" CURRENT RAW STATE (Debug Info)")
-          _ <- C.putStrLn("="*45)
-          _ <- C.putStrLn(s" * Inventory:       ${state.inventory}")
-          _ <- C.putStrLn(s" * Inserted Amount: ${state.insertedAmount}")
-          _ <- C.putStrLn(s" * Total Revenue:   ${state.revenue}")
-          sortedTill = state.coinsTill.toList.sortBy(_._1).map { case (k, v) => s"$k -> $v" }.mkString(", ")
-          _ <- C.putStrLn(s" * Coins in Till:   List($sortedTill)")
-          _ <- C.putStrLn(s" * Used StudentIDs: ${state.usedStudentIds}")
-          _ <- C.putStrLn(s" * Current Day:     ${state.dayCounter}")
-          _ <- C.putStrLn(s" * Session Coins:   ${state.currentSessionCoins}")
-          _ <- C.putStrLn("="*45)
-          _ <- C.putStrLn(" Press Enter to return to menu... ")
-          _ <- C.readLn()
-          _ <- programLoop[F]
-        } yield ()
-
-      case MenuCommand.ShowLog =>
-        for {
-          logs <- VM.getLogs()
-          _ <- C.putStrLn("\n" + "="*45)
-          _ <- C.putStrLn(" SYSTEM LOG HISTORY")
-          _ <- C.putStrLn("="*45)
-          _ <- if (logs.isEmpty) C.putStrLn("  [Log is empty.]")
-          else logs.foldLeft(Monad[F].pure(()))((acc, log) => acc.flatMap(_ => C.putStrLn(s"  -> $log")))
-          _ <- C.putStrLn("="*45)
-          _ <- C.putStrLn(" Press Enter to return to menu... ")
-          _ <- C.readLn()
-          _ <- programLoop[F]
-        } yield ()
-
-      case MenuCommand.Exit =>
-        for {
-          state <- VM.getRawState()
-          _ <- C.putStrLn("\nShutting down vending machine...")
-          _ <- C.putStrLn("Final State Summary:")
-          _ <- C.putStrLn(s" Total Revenue: ${state.revenue} coins")
-          _ <- C.putStrLn("Goodbye!")
-        } yield ()
-
-      case MenuCommand.Empty => programLoop[F]
-
-      case MenuCommand.Unknown(raw) =>
-        C.putStrLn(s"\n[!] Unknown action '$raw'.")
+  def actionBuyProduct[F[_]: Monad](implicit C: Console[F], VM: VendingMachine[F]): F[Unit] =
+    for {
+      _ <- C.putStrLn("\n Select product by Number (1-4) or Name (e.g. Cola):")
+      _ <- C.putStrLn(" Selection: ")
+      productInput <- C.readLn()
+      state <- VM.getRawState()
+      _ <- parseProductSelection(productInput).fold(
+        C.putStrLn("\n[!] Invalid product selection.")
           .flatMap(_ => C.readLn())
           .flatMap(_ => programLoop[F])
-    }
-  }
+      )(productName =>
+        for {
+          studentIdOpt <- askForStudentId[F](state)
+          _ <- VM.selectProduct(productName, studentIdOpt)
+          _ <- programLoop[F]
+        } yield ()
+      )
+    } yield ()
+
+  def actionRefillProduct[F[_]: Monad](implicit C: Console[F], VM: VendingMachine[F]): F[Unit] =
+    for {
+      _ <- C.putStrLn(" Enter product name to refill (e.g. Cola): ")
+      pInput <- C.readLn()
+      _ <- C.putStrLn(" Enter amount to add: ")
+      aInput <- C.readLn()
+      amount = Try(aInput.trim.toInt).getOrElse(0)
+      _ <- parseProductSelection(pInput).filter(_ => amount > 0).fold(
+        C.putStrLn("\n[!] Invalid product or amount.")
+          .flatMap(_ => C.readLn())
+          .flatMap(_ => programLoop[F])
+      )(productName =>
+        VM.refillProduct(productName, amount).flatMap(_ => programLoop[F])
+      )
+    } yield ()
+
+  def actionShowState[F[_]: Monad](implicit C: Console[F], VM: VendingMachine[F]): F[Unit] =
+    for {
+      state <- VM.getRawState()
+      _ <- C.putStrLn("\n" + "="*45)
+      _ <- C.putStrLn(" CURRENT RAW STATE (Debug Info)")
+      _ <- C.putStrLn("="*45)
+      _ <- C.putStrLn(s" * Inventory:       ${state.inventory}")
+      _ <- C.putStrLn(s" * Inserted Amount: ${state.insertedAmount}")
+      _ <- C.putStrLn(s" * Total Revenue:   ${state.revenue}")
+      sortedTill = state.coinsTill.toList.sortBy(_._1).map { case (k, v) => s"$k -> $v" }.mkString(", ")
+      _ <- C.putStrLn(s" * Coins in Till:   List($sortedTill)")
+      _ <- C.putStrLn(s" * Used StudentIDs: ${state.usedStudentIds}")
+      _ <- C.putStrLn(s" * Current Day:     ${state.dayCounter}")
+      _ <- C.putStrLn(s" * Session Coins:   ${state.currentSessionCoins}")
+      _ <- C.putStrLn("="*45)
+      _ <- C.putStrLn(" Press Enter to return to menu... ")
+      _ <- C.readLn()
+      _ <- programLoop[F]
+    } yield ()
+
+  def actionShowLog[F[_]: Monad](implicit C: Console[F], VM: VendingMachine[F]): F[Unit] =
+    for {
+      logs <- VM.getLogs()
+      _ <- C.putStrLn("\n" + "="*45)
+      _ <- C.putStrLn(" SYSTEM LOG HISTORY")
+      _ <- C.putStrLn("="*45)
+      _ <- if (logs.isEmpty) C.putStrLn("  [Log is empty.]")
+      else logs.foldLeft(Monad[F].pure(()))((acc, log) => acc.flatMap(_ => C.putStrLn(s"  -> $log")))
+      _ <- C.putStrLn("="*45)
+      _ <- C.putStrLn(" Press Enter to return to menu... ")
+      _ <- C.readLn()
+      _ <- programLoop[F]
+    } yield ()
+
+  def actionExit[F[_]: Monad](implicit C: Console[F], VM: VendingMachine[F]): F[Unit] =
+    for {
+      state <- VM.getRawState()
+      _ <- C.putStrLn("\nShutting down vending machine...")
+      _ <- C.putStrLn("Final State Summary:")
+      _ <- C.putStrLn(s" Total Revenue: ${state.revenue} coins")
+      _ <- C.putStrLn("Goodbye!")
+    } yield ()
+
+  def actionUnknown[F[_]: Monad](raw: String)(implicit C: Console[F], VM: VendingMachine[F]): F[Unit] =
+    C.putStrLn(s"\n[!] Unknown action '$raw'.")
+      .flatMap(_ => C.readLn())
+      .flatMap(_ => programLoop[F])
 
   def main(args: Array[String]): Unit = {
     import vending.monads.VendingEff.vendingEffMonad
