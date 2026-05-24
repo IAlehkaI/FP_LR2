@@ -4,7 +4,6 @@ import vending.algebras.VendingMachine
 import vending.domain.VendingMachineState
 import vending.monads.VendingEff
 
-// ДОБАВЛЕНЫ ЭТИ ДВА ИМПОРТА:
 import vending.monads.Monad.syntax._
 import vending.monads.VendingEff.vendingEffMonad
 
