@@ -54,17 +54,8 @@ class LiveVendingMachine extends VendingMachine[VendingEff] {
               VendingEff.tellW(s"Purchase failed: $err").map(_ => Left(err))
             } else {
               val change = state.insertedAmount - price
-              val newUsedIds = studentIdOpt.map(state.usedStudentIds + _).getOrElse(state.usedStudentIds)
               for {
-                _ <- VendingEff.modifyS { s =>
-                  s.copy(
-                    inventory = s.inventory.updated(product, s.inventory(product) - 1),
-                    insertedAmount = 0,
-                    revenue = s.revenue + price,
-                    usedStudentIds = newUsedIds,
-                    currentSessionCoins = Nil
-                  )
-                }
+                _ <- VendingEff.modifyS(s => updateStateOnSuccess(s, product, price, studentIdOpt))
                 _ <- VendingEff.tellW(s"Purchase successful! Change returned: $change. Enjoy your $product!")
               } yield Right(change)
             }
@@ -123,4 +114,24 @@ class LiveVendingMachine extends VendingMachine[VendingEff] {
   def getRawState(): VendingEff[VendingMachineState] = VendingEff.getS
 
   def getLogs(): VendingEff[List[String]] = VendingEff.getW
+
+  // Вспомогательный метод для обновления состояния при успешной покупке
+  private def updateStateOnSuccess(
+                                    state: VendingMachineState,
+                                    product: String,
+                                    price: Int,
+                                    studentIdOpt: Option[String]
+                                  ): VendingMachineState = {
+    val newUsedIds = studentIdOpt
+      .map(id => state.usedStudentIds + id)
+      .getOrElse(state.usedStudentIds)
+
+    state.copy(
+      inventory = state.inventory.updated(product, state.inventory(product) - 1),
+      insertedAmount = 0,
+      revenue = state.revenue + price,
+      usedStudentIds = newUsedIds,
+      currentSessionCoins = Nil
+    )
+  }
 }
